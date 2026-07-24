@@ -17,7 +17,30 @@ from sklearn.preprocessing import StandardScaler
 
 
 APP_DIR = Path(__file__).resolve().parent
-DEFAULT_DATASET = APP_DIR / "data" / "Final_Dataset.csv"
+
+# The repo has historically had the real data under a couple of different
+# names/locations ("data/solar_dataset.csv" was left as an empty placeholder
+# in some commits). Try the known candidates in order and use the first one
+# that actually exists and has content, instead of hard-failing on a single
+# empty file.
+_CANDIDATE_DATASETS = [
+    APP_DIR / "data" / "Final_Dataset.csv",
+    APP_DIR / "Final_Dataset.csv",
+    APP_DIR / "data" / "solar_dataset.csv",
+]
+
+
+def _resolve_default_dataset() -> Path:
+    for candidate in _CANDIDATE_DATASETS:
+        if candidate.exists() and candidate.stat().st_size > 0:
+            return candidate
+    # Fall back to the first candidate so the error message below still
+    # points somewhere sensible if none of them exist.
+    return _CANDIDATE_DATASETS[0]
+
+
+DEFAULT_DATASET = _resolve_default_dataset()
+
 
 class DataLoader:
     """Load the repository dataset using paths that work on Windows and Linux."""
