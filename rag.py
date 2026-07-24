@@ -36,6 +36,16 @@ class DataLoader:
         self.df_merged: Optional[pd.DataFrame] = None
 
     @property
+    def dataset_candidates(self) -> List[Path]:
+        """Return the plain dataset followed by its compressed fallback."""
+        candidates = [self.dataset_path]
+        if self.dataset_path.suffix != ".gz":
+            candidates.append(
+                self.dataset_path.with_name(f"{self.dataset_path.name}.gz")
+            )
+        return candidates
+
+    @property
     def cities(self) -> List[str]:
         return [*self.CITY_COLUMNS, self.BASE_CITY]
 
@@ -48,23 +58,41 @@ class DataLoader:
         return self.df_merged["Date"].max().date() if self.df_merged is not None else None
 
     def load_datasets(self) -> bool:
-        if not self.dataset_path.exists():
-            raise FileNotFoundError(
-                f"Dataset not found at {self.dataset_path}. "
-                "Commit data/solar_dataset.csv to the GitHub repository."
-            )
+        failures = []
 
-        frame = pd.read_csv(self.dataset_path)
-        if "Date" not in frame.columns:
-            raise ValueError("The dataset must contain a Date column.")
+        for candidate in self.dataset_candidates:
+            if not candidate.exists():
+                failures.append(f"{candidate.name}: missing")
+                continue
+            if candidate.stat().st_size == 0:
+                failures.append(f"{candidate.name}: empty")
+                continue
 
-        frame["Date"] = pd.to_datetime(frame["Date"], errors="coerce")
-        frame = frame.dropna(subset=["Date"]).copy()
-        if frame.empty:
-            raise ValueError("The dataset contains no valid dates.")
+            try:
+                frame = pd.read_csv(candidate)
+            except (pd.errors.EmptyDataError, pd.errors.ParserError) as exc:
+                failures.append(f"{candidate.name}: {exc}")
+                continue
 
-        self.df_merged = frame
-        return True
+            if "Date" not in frame.columns:
+                failures.append(f"{candidate.name}: missing Date column")
+                continue
+
+            frame["Date"] = pd.to_datetime(frame["Date"], errors="coerce")
+            frame = frame.dropna(subset=["Date"]).copy()
+            if frame.empty:
+                failures.append(f"{candidate.name}: no valid dates")
+                continue
+
+            self.dataset_path = candidate
+            self.df_merged = frame
+            return True
+
+        details = "; ".join(failures)
+        raise ValueError(
+            "Unable to load the solar dataset. "
+            f"Attempted: {details}. Commit a non-empty dataset to data/."
+        )
 
     def _city_mask(self, city: str) -> pd.Series:
         assert self.df_merged is not None
