@@ -7,6 +7,9 @@ import streamlit as st
 from rag import SolarRAG
 
 
+APP_BUILD = "2026-07-25-dataset-rebuild"
+
+
 st.set_page_config(
     page_title="Solar Project RAG",
     page_icon="☀️",
@@ -31,7 +34,7 @@ st.markdown(
 
 
 @st.cache_resource(show_spinner=False)
-def initialize_rag() -> SolarRAG:
+def initialize_rag_dataset_rebuild() -> SolarRAG:
     """Load the dataset once; ML training is deferred until the first query."""
     system = SolarRAG()
     system.setup()
@@ -39,11 +42,14 @@ def initialize_rag() -> SolarRAG:
 
 
 try:
-    rag = initialize_rag()
+    rag = initialize_rag_dataset_rebuild()
 except Exception as exc:
     st.error("The app could not load its dataset.")
     st.code(str(exc))
-    st.info("Make sure data/solar_dataset.csv is committed to the GitHub repository.")
+    st.info(
+        "Make sure data/solar_dataset.csv or data/solar_dataset.csv.gz "
+        "is committed to the GitHub repository."
+    )
     st.stop()
 
 
@@ -64,6 +70,7 @@ st.title("☀️ Solar Project RAG")
 st.caption(
     "Explore historical solar-generation and air-quality conditions across five Saudi cities."
 )
+st.caption(f"Build: {APP_BUILD}")
 
 with st.sidebar:
     st.header("Query")
