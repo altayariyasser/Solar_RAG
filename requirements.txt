@@ -1,0 +1,7 @@
+# Streamlit Community Cloud defaults to Python 3.12.
+# Keep this list small so cold builds stay fast and reliable.
+streamlit==1.59.2
+pandas>=2.2,<3
+numpy>=1.26,<3
+scikit-learn>=1.4,<2
+plotly>=5.18,<7
