@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import json
+import os
 import re
+import urllib.error
+import urllib.request
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -255,6 +259,106 @@ class KnowledgeBase:
         return [self.knowledge_items[index] for index in indices]
 
 
+class OllamaExplainer:
+    """Generate grounded explanations through Ollama Cloud when configured."""
+
+    DEFAULT_HOST = "https://ollama.com"
+    DEFAULT_MODEL = "gpt-oss:20b"
+    CONTEXT_FEATURES = [
+        "temperature_2m_mean",
+        "relative_humidity_2m_mean",
+        "wind_speed_10m_mean",
+        "cloud_cover_mean",
+        "precipitation_sum",
+        "shortwave_radiation_sum",
+        "sunshine_duration",
+        "pm10",
+        "pm2_5",
+        "carbon_monoxide",
+        "nitrogen_dioxide",
+        "ozone",
+        "sulphur_dioxide",
+    ]
+
+    def __init__(self):
+        self.api_key = os.getenv("OLLAMA_API_KEY", "").strip()
+        self.host = os.getenv("OLLAMA_HOST", self.DEFAULT_HOST).strip().rstrip("/")
+        self.model = os.getenv("OLLAMA_MODEL", self.DEFAULT_MODEL).strip()
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.api_key and self.host and self.model)
+
+    def explain(
+        self,
+        user_query: str,
+        city: str,
+        date_str: str,
+        data: Dict,
+        predictions: Dict,
+        interpretations: List[str],
+    ) -> Tuple[Optional[str], str]:
+        if not self.configured:
+            return None, "not_configured"
+
+        observed = {
+            key: data.get(key)
+            for key in self.CONTEXT_FEATURES
+            if data.get(key) is not None
+        }
+        prompt = (
+            f"User question: {user_query}\n"
+            f"Location and date: {city}, {date_str}\n"
+            f"Observed measurements: {json.dumps(observed, default=str)}\n"
+            f"Model predictions: {json.dumps(predictions, default=str)}\n"
+            "Retrieved domain guidance:\n- "
+            + "\n- ".join(interpretations)
+            + "\n\nExplain the solar-generation and air-quality conditions in no more "
+            "than 160 words. Connect the measurements to the predictions, mention "
+            "important uncertainty, and give one practical recommendation. Use only "
+            "the supplied facts and do not describe historical data as a live forecast."
+        )
+        payload = {
+            "model": self.model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a concise solar-energy and air-quality analyst. "
+                        "Ground every statement in the supplied context."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            "stream": False,
+            "options": {"temperature": 0.2, "num_predict": 220},
+        }
+        request = urllib.request.Request(
+            f"{self.host}/api/chat",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                body = json.loads(response.read().decode("utf-8"))
+            explanation = str(body.get("message", {}).get("content", "")).strip()
+            if explanation:
+                return explanation, "ollama_cloud"
+        except (
+            json.JSONDecodeError,
+            OSError,
+            TimeoutError,
+            urllib.error.URLError,
+        ):
+            pass
+        return None, "unavailable"
+
+
 class SolarRAG:
     """Combine dataset retrieval, compact ML predictions, and local RAG context."""
 
@@ -262,6 +366,7 @@ class SolarRAG:
         self.data_loader = DataLoader(dataset_path)
         self.trainer = ModelTrainer(self.data_loader)
         self.kb = KnowledgeBase()
+        self.explainer = OllamaExplainer()
         self.ready = False
 
     def setup(self) -> bool:
@@ -277,6 +382,7 @@ class SolarRAG:
             "predictions": {},
             "interpretations": [],
             "llm_response": None,
+            "llm_status": "not_configured",
         }
 
         if not city:
@@ -308,11 +414,19 @@ class SolarRAG:
             f"{predictions['solar_output_kwh']:.1f} {predictions['aqi_value']:.1f}"
         )
         interpretations = self.kb.retrieve(query_context)
-        summary = (
+        fallback_summary = (
             f"For {city} on {date_str}, estimated solar output is "
             f"{predictions['solar_output_kwh']:.1f} kWh and predicted AQI is "
             f"{predictions['aqi_value']:.0f} ({predictions['aqi_risk_level']}). "
             f"{interpretations[0]}"
+        )
+        llm_response, llm_status = self.explainer.explain(
+            user_query,
+            city,
+            date_str,
+            data,
+            predictions,
+            interpretations,
         )
 
         result.update(
@@ -320,7 +434,8 @@ class SolarRAG:
             data=self._clean_values(data),
             predictions=predictions,
             interpretations=interpretations,
-            llm_response=summary,
+            llm_response=llm_response or fallback_summary,
+            llm_status=llm_status,
         )
         return result
 
