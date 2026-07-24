@@ -17,7 +17,7 @@ from sklearn.preprocessing import StandardScaler
 
 
 APP_DIR = Path(__file__).resolve().parent
-DEFAULT_DATASET = APP_DIR / "Final_Dataset.csv"
+DEFAULT_DATASET = APP_DIR / "data" / "Final_Dataset.csv"
 
 class DataLoader:
     """Load the repository dataset using paths that work on Windows and Linux."""
