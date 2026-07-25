@@ -53,7 +53,66 @@ class SolarRAGConversationTests(unittest.TestCase):
         result = self.rag.process_query("How much solar energy in Riyadh?")
 
         self.assertEqual(result["status"], "error")
-        self.assertIn("Include a date", result["error"])
+        self.assertIn("What date", result["error"])
+
+    def test_natural_language_date_is_understood(self):
+        city, date_str = self.rag._extract_location_date(
+            "What is the Riyadh outlook for February 2nd, 2026?"
+        )
+
+        self.assertEqual(city, "Riyadh")
+        self.assertEqual(date_str, "2026-02-02")
+
+    def test_follow_up_reuses_conversation_context(self):
+        result = self.rag.process_query(
+            "What about Jeddah?",
+            context={
+                "city": "Riyadh",
+                "date": "2024-02-02",
+                "intents": ["solar energy"],
+            },
+        )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["city"], "Jeddah")
+        self.assertEqual(result["date"], "2024-02-02")
+        self.assertEqual(result["intents"], ["solar energy"])
+
+    def test_out_of_dataset_date_uses_live_features(self):
+        api_features = {
+            "temperature_2m_mean": 22.0,
+            "relative_humidity_2m_mean": 35.0,
+            "surface_pressure_mean": 950.0,
+            "wind_speed_10m_mean": 11.0,
+            "cloud_cover_mean": 18.0,
+            "precipitation_sum": 0.0,
+            "shortwave_radiation_sum": 19.0,
+            "sunshine_duration": 36000.0,
+            "pm10": 44.0,
+            "pm2_5": 18.0,
+            "carbon_monoxide": 160.0,
+            "nitrogen_dioxide": 13.0,
+            "ozone": 70.0,
+            "sulphur_dioxide": 8.0,
+            "Date": "2026-02-02",
+            "City": "Riyadh",
+            "_source_kind": "historical",
+            "_source_label": "Open-Meteo · historical weather",
+            "_air_quality_available": True,
+        }
+        with patch.object(
+            self.rag.live_data,
+            "get_features",
+            return_value=(api_features, None),
+        ) as get_features:
+            result = self.rag.process_query(
+                "Solar outlook for Riyadh on February 2, 2026"
+            )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["source_kind"], "historical")
+        self.assertGreater(result["predictions"]["solar_output_kwh"], 0)
+        get_features.assert_called_once_with("Riyadh", "2026-02-02")
 
     def test_makkah_alias_maps_to_mecca(self):
         result = self.rag.process_query(

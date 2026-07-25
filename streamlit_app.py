@@ -1,8 +1,10 @@
-"""Conversational Streamlit entrypoint for the Solar Project RAG app."""
+"""Business dashboard and conversational analyst for solar decision intelligence."""
 
 from __future__ import annotations
 
-from typing import Any, Dict
+import calendar
+from datetime import datetime
+from typing import Any, Dict, Optional
 
 import pandas as pd
 import streamlit as st
@@ -10,21 +12,21 @@ import streamlit as st
 from rag import SolarRAG
 
 
-APP_BUILD = "2026-07-25-conversational-rag"
+APP_BUILD = "2026-07-25-project-dashboard"
 
 SUGGESTIONS = {
-    ":blue[:material/partly_cloudy_day:] Riyadh weather": (
-        "What was the weather in Riyadh on 2024-02-02?"
+    ":orange[:material/solar_power:] Solar potential": (
+        "How much solar energy could Riyadh produce on February 2, 2026?"
     ),
-    ":orange[:material/solar_power:] Jeddah solar energy": (
-        "How much solar energy could I get in Jeddah on 2024-06-15?"
+    ":blue[:material/cloud:] Weather conditions": (
+        "Review Jeddah's weather and solar potential on 15 June 2024."
     ),
-    ":green[:material/check_circle:] Medina suitability": (
-        "Was Medina suitable for solar generation on 2024-09-01?"
+    ":green[:material/health_and_safety:] Air-quality risk": (
+        "How were the solar conditions and air-quality risk in Dammam "
+        "on 10 March 2024?"
     ),
-    ":violet[:material/air:] Dammam combined analysis": (
-        "How were the weather, air quality, and solar potential in Dammam "
-        "on 2024-03-10?"
+    ":violet[:material/location_city:] Site suitability": (
+        "Was Medina suitable for solar generation on 1 September 2024?"
     ),
 }
 
@@ -34,8 +36,8 @@ WEATHER_FEATURES = {
     "wind_speed_10m_mean": ("Wind speed", "km/h"),
     "cloud_cover_mean": ("Cloud cover", "%"),
     "precipitation_sum": ("Precipitation", "mm"),
-    "shortwave_radiation_sum": ("Shortwave radiation", "MJ/m²"),
-    "sunshine_duration": ("Sunshine duration", "seconds"),
+    "shortwave_radiation_sum": ("Solar radiation", "MJ/m²"),
+    "sunshine_duration": ("Sunshine duration", "hours"),
 }
 
 AIR_FEATURES = {
@@ -49,15 +51,15 @@ AIR_FEATURES = {
 
 
 st.set_page_config(
-    page_title="Solar RAG assistant",
-    page_icon="☀️",
+    page_title="Solar IQ | Decision intelligence",
+    page_icon=":material/solar_power:",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
 
 def get_secret(name: str, default: str = "") -> str:
-    """Read a root-level Streamlit secret without exposing it in the UI."""
+    """Read a root-level Streamlit secret without displaying it."""
     try:
         value = st.secrets.get(name, default)
     except Exception:
@@ -71,7 +73,7 @@ def initialize_rag(
     ollama_host: str,
     ollama_model: str,
 ) -> SolarRAG:
-    """Load the dataset once and rebuild the resource when configuration changes."""
+    """Load the dataset and reusable prediction resources once."""
     system = SolarRAG(
         ollama_api_key=ollama_api_key,
         ollama_host=ollama_host,
@@ -81,178 +83,324 @@ def initialize_rag(
     return system
 
 
-ollama_api_key = get_secret("OLLAMA_API_KEY")
-ollama_host = get_secret("OLLAMA_HOST", "https://ollama.com")
-ollama_model = get_secret("OLLAMA_MODEL", "gpt-oss:20b")
-
 try:
-    rag = initialize_rag(ollama_api_key, ollama_host, ollama_model)
-except Exception as exc:
-    st.error("The app could not load its dataset.")
-    st.code(str(exc))
-    st.info(
-        "Make sure data/solar_dataset.csv or data/solar_dataset.csv.gz "
-        "is committed to the GitHub repository."
+    rag = initialize_rag(
+        get_secret("OLLAMA_API_KEY"),
+        get_secret("OLLAMA_HOST", "https://ollama.com"),
+        get_secret("OLLAMA_MODEL", "gpt-oss:20b"),
     )
+except Exception as exc:
+    st.error(
+        "Solar IQ could not load its analytical dataset.",
+        icon=":material/error:",
+    )
+    st.code(str(exc))
     st.stop()
 
 
 st.session_state.setdefault("messages", [])
 
 
-def format_measurement(value: Any, unit: str) -> str:
-    """Format a numeric measurement for the result tables."""
+def format_measurement(key: str, value: Any, unit: str) -> str:
+    """Format measurements for executive-friendly tables."""
     try:
         number = float(value)
     except (TypeError, ValueError):
         return str(value)
-    precision = 0 if unit in {"%", "seconds"} else 1
+    if key == "sunshine_duration":
+        number /= 3600
+        return f"{number:.1f} {unit}"
+    precision = 0 if unit == "%" else 1
     return f"{number:.{precision}f} {unit}".strip()
 
 
 def measurement_table(data: Dict, features: Dict[str, tuple[str, str]]) -> pd.DataFrame:
-    """Build a display-safe table from selected retrieved features."""
     rows = []
     for key, (label, unit) in features.items():
         if data.get(key) is not None:
             rows.append(
                 {
-                    "Measurement": label,
-                    "Observed value": format_measurement(data[key], unit),
+                    "Decision factor": label,
+                    "Value": format_measurement(key, data[key], unit),
                 }
             )
     return pd.DataFrame(rows)
 
 
-def render_analysis(result: Dict) -> None:
-    """Render one complete RAG answer inside an assistant chat message."""
-    if result.get("status") != "success":
-        st.error(result.get("error", "The question could not be processed."))
-        st.caption(
-            "Include one supported city and a historical date, such as "
-            "`Riyadh 2024-02-02`."
+def friendly_date(date_value: Optional[str]) -> str:
+    if not date_value:
+        return ""
+    parsed = datetime.strptime(date_value, "%Y-%m-%d")
+    return parsed.strftime("%B %d, %Y").replace(" 0", " ")
+
+
+def conversation_context() -> Dict:
+    """Use the last successful turn to resolve short follow-up questions."""
+    for message in reversed(st.session_state.messages):
+        result = message.get("result")
+        if result and result.get("status") == "success":
+            return {
+                "city": result.get("city"),
+                "date": result.get("date"),
+                "intents": result.get("intents"),
+            }
+    return {}
+
+
+def city_seasonal_profile(city: str) -> pd.DataFrame:
+    """Build a monthly solar profile for the selected project market."""
+    frame = rag.data_loader.df_merged
+    if frame is None:
+        return pd.DataFrame()
+    city_frame = frame.loc[rag.data_loader._city_mask(city)].copy()
+    if city_frame.empty:
+        return pd.DataFrame()
+    profile = (
+        city_frame.groupby("Month", as_index=False)
+        .agg(
+            {
+                "Estimated Daily Output (kWh)": "mean",
+                "shortwave_radiation_sum": "mean",
+            }
         )
+        .sort_values("Month")
+    )
+    profile["Month"] = profile["Month"].map(
+        lambda value: calendar.month_abbr[int(value)]
+    )
+    return profile.rename(
+        columns={
+            "Estimated Daily Output (kWh)": "Estimated solar output",
+            "shortwave_radiation_sum": "Solar radiation",
+        }
+    )
+
+
+def solar_position(value: float) -> tuple[str, str]:
+    """Translate model output into a portfolio-relative business signal."""
+    frame = rag.data_loader.df_merged
+    target = "Estimated Daily Output (kWh)"
+    if frame is None or target not in frame:
+        return "Model estimate", "Portfolio benchmark unavailable"
+    values = pd.to_numeric(frame[target], errors="coerce").dropna()
+    if values.empty:
+        return "Model estimate", "Portfolio benchmark unavailable"
+    percentile = int(round((values <= value).mean() * 100))
+    if percentile >= 75:
+        label = "High potential"
+    elif percentile >= 40:
+        label = "Balanced"
+    else:
+        label = "Lower potential"
+    return label, f"{percentile}th percentile in the modeled portfolio"
+
+
+def render_analysis(result: Dict) -> None:
+    """Render one business-facing analytical answer."""
+    if result.get("status") != "success":
+        st.write(result.get("error", "I could not complete that analysis."))
         return
 
     predictions = result["predictions"]
     data = result["data"]
-    llm_status = result.get("llm_status")
+    position_label, position_detail = solar_position(
+        predictions["solar_output_kwh"]
+    )
 
-    st.markdown("#### Ollama RAG explanation")
-    if llm_status == "ollama_cloud":
+    with st.container(border=True):
+        with st.container(horizontal=True, vertical_alignment="center"):
+            st.subheader(
+                "Executive outlook",
+                anchor=False,
+                width="stretch",
+            )
+            st.badge(
+                result.get("source_kind", "model").capitalize(),
+                icon=":material/database:",
+                color="blue" if result.get("source_kind") == "historical" else "orange",
+            )
         st.caption(
-            f":material/smart_toy: Generated by Ollama Cloud "
-            f"(`{ollama_model}`) from retrieved data, ML predictions, and knowledge."
+            f"{result['city']} · {friendly_date(result['date'])} · "
+            f"{result.get('source_label', 'Model inputs')}"
         )
-    elif llm_status == "not_configured":
-        st.warning(
-            "Ollama Cloud is not configured. Showing the built-in grounded RAG "
-            "summary instead."
-        )
-    else:
-        st.warning(
-            "Ollama Cloud could not generate this answer. Showing the built-in "
-            "grounded RAG summary instead."
-        )
-        if result.get("llm_error"):
-            st.caption(result["llm_error"])
+        st.markdown(result["llm_response"])
 
-    st.markdown(result["llm_response"])
-
-    st.markdown("#### Model results")
+    st.subheader("Key results", anchor=False)
     with st.container(horizontal=True):
         st.metric(
-            "Estimated daily solar energy",
+            "Estimated solar energy",
             f"{predictions['solar_output_kwh']:.1f} kWh",
             border=True,
         )
         st.metric(
-            "Predicted AQI",
-            f"{predictions['aqi_value']:.0f}",
+            "Portfolio position",
+            position_label,
+            position_detail,
             border=True,
         )
         st.metric(
-            "Air-quality risk",
+            "Air quality",
             predictions["aqi_risk_level"],
+            f"AQI {predictions['aqi_value']:.0f}",
             border=True,
         )
 
-    weather_column, air_column = st.columns(2)
-    with weather_column:
-        with st.container(border=True):
-            st.markdown("**Retrieved weather features**")
+    with st.expander(
+        "View decision drivers",
+        icon=":material/analytics:",
+    ):
+        weather_column, air_column = st.columns(2)
+        with weather_column:
+            st.markdown("**Weather and solar**")
             st.dataframe(
                 measurement_table(data, WEATHER_FEATURES),
                 hide_index=True,
                 width="stretch",
             )
+        with air_column:
+            st.markdown("**Air quality**")
+            air_table = measurement_table(data, AIR_FEATURES)
+            if air_table.empty:
+                st.caption(
+                    "Air-quality observations were unavailable. The estimate "
+                    "uses the model's trained baseline."
+                )
+            else:
+                st.dataframe(air_table, hide_index=True, width="stretch")
 
-    with air_column:
-        with st.container(border=True):
-            st.markdown("**Retrieved air-quality features**")
-            st.dataframe(
-                measurement_table(data, AIR_FEATURES),
-                hide_index=True,
-                width="stretch",
-            )
-
-    with st.expander("Knowledge retrieved for this answer"):
+    with st.expander(
+        "Analytical guidance",
+        icon=":material/strategy:",
+    ):
         for item in result["interpretations"]:
             st.markdown(f"- {item}")
 
-    with st.expander("How this answer was produced"):
-        st.markdown(
-            "1. The question parser identifies the city, date, and requested topics.\n"
-            "2. The app retrieves that city-day's historical weather and pollution "
-            "features from the project dataset.\n"
-            "3. The trained models estimate daily solar output and AQI.\n"
-            "4. TF-IDF retrieval selects relevant solar and air-quality knowledge.\n"
-            "5. Ollama Cloud receives only that grounded context and writes the final "
-            "explanation."
-        )
-        st.caption(
-            "The dataset covers historical 2024 observations. Results are analytical "
-            "estimates, not a live weather forecast or a guaranteed PV system yield."
-        )
-
-
-st.title("Solar RAG assistant")
-st.caption(
-    "Ask about historical weather, solar-energy potential, air quality, or solar "
-    "suitability across Riyadh, Jeddah, Mecca, Medina, and Dammam."
-)
 
 with st.sidebar:
-    st.header("System status")
-    if rag.explainer.configured:
-        st.success(f"Ollama Cloud configured\n\nModel: `{rag.explainer.model}`")
-    else:
-        st.warning("Ollama Cloud API key is not configured.")
+    st.markdown("## :orange[:material/solar_power:] Solar IQ")
+    st.caption("Solar and environmental intelligence")
+    st.badge("Models operational", icon=":material/check_circle:", color="green")
 
-    st.markdown("**Available data**")
-    st.write(f"{rag.data_loader.min_date} to {rag.data_loader.max_date}")
-    st.write(", ".join(rag.data_loader.cities))
-
-    st.markdown("**Supported questions**")
-    st.caption(
-        "Weather conditions · estimated solar energy · air quality · "
-        "solar suitability · combined analysis"
+    st.space("medium")
+    selected_market = st.selectbox(
+        "Market overview",
+        rag.data_loader.cities,
+        index=rag.data_loader.cities.index("Riyadh"),
+    )
+    st.badge(
+        "Historical + live inputs",
+        icon=":material/cloud_sync:",
+        color="blue",
     )
 
+    st.space("medium")
+    st.caption(
+        "Solar output · weather · air quality · suitability · combined analysis"
+    )
+
+    st.space("medium")
     if st.button(
-        "Clear conversation",
-        icon=":material/delete_sweep:",
+        "Start a new analysis",
+        icon=":material/add_comment:",
+        type="primary",
         width="stretch",
         disabled=not st.session_state.messages,
     ):
         st.session_state.messages = []
         st.rerun()
 
-    st.caption(f"Build: {APP_BUILD}")
+    st.caption(f"Decision engine · {APP_BUILD}")
+
+
+with st.container(horizontal=True, vertical_alignment="center"):
+    with st.container(width="stretch"):
+        st.caption(":orange-badge[SOLAR DECISION INTELLIGENCE]")
+        st.title("Solar intelligence dashboard", anchor=False)
+        st.write(
+            "Explore solar generation, weather, air quality, and site suitability "
+            "across the project's five Saudi markets."
+        )
+    st.badge(
+        "5 markets",
+        icon=":material/map:",
+        color="orange",
+    )
+
+
+frame = rag.data_loader.df_merged
+historical_days = int(frame["Date"].nunique()) if frame is not None else 0
+with st.container(horizontal=True):
+    st.metric(
+        "Markets covered",
+        str(len(rag.data_loader.cities)),
+        "Saudi Arabia",
+        border=True,
+    )
+    st.metric(
+        "Historical coverage",
+        f"{historical_days} days",
+        "Full seasonal cycle",
+        border=True,
+    )
+    st.metric(
+        "Analytical models",
+        "2 models",
+        "Solar output + AQI",
+        border=True,
+    )
+
+
+profile_column, brief_column = st.columns([1.65, 1], border=True)
+with profile_column:
+    st.subheader(f"{selected_market} seasonal profile", anchor=False)
+    st.caption("Average modeled daily solar output by month · 2024 baseline")
+    seasonal_profile = city_seasonal_profile(selected_market)
+    if not seasonal_profile.empty:
+        st.bar_chart(
+            seasonal_profile,
+            x="Month",
+            y="Estimated solar output",
+            x_label="Month",
+            y_label="Daily solar output (kWh)",
+        )
+
+with brief_column:
+    st.subheader("Project capabilities", anchor=False)
+    st.caption("One clear view across the full analytical workflow")
+    st.markdown(
+        """
+        **:material/solar_power: Solar generation**
+
+        Predict daily energy potential from environmental conditions.
+
+        **:material/cloud: Weather and air quality**
+
+        Understand temperature, radiation, clouds, pollution, and AQI.
+
+        **:material/task_alt: Site suitability**
+
+        Combine supporting factors, limitations, and practical guidance.
+        """
+    )
+    st.caption("Use the analyst below for a city and date-specific answer.")
+
+
+st.subheader("Ask the solar analyst", anchor=False)
+st.caption(
+    "Ask naturally about a market and date. Follow-ups such as "
+    "“What about Jeddah?” retain the previous context."
+)
 
 
 for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
+    with st.chat_message(
+        message["role"],
+        avatar=(
+            ":material/business_messages:"
+            if message["role"] == "assistant"
+            else ":material/person:"
+        ),
+    ):
         if message["role"] == "user":
             st.markdown(message["content"])
         else:
@@ -261,12 +409,8 @@ for message in st.session_state.messages:
 
 selected_suggestion = None
 if not st.session_state.messages:
-    st.info(
-        "Ask a natural-language question that includes a supported city and a "
-        "date from 2024."
-    )
     selected_suggestion = st.pills(
-        "Try asking",
+        "Suggested analyses",
         list(SUGGESTIONS),
         selection_mode="single",
         label_visibility="collapsed",
@@ -274,7 +418,7 @@ if not st.session_state.messages:
 
 
 prompt = st.chat_input(
-    "Ask about weather, solar energy, air quality, or site suitability…",
+    "Ask about solar potential, seasonal conditions, or environmental risk…",
     submit_mode="disable",
 )
 if selected_suggestion:
@@ -282,15 +426,18 @@ if selected_suggestion:
 
 
 if prompt:
+    context = conversation_context()
+    context.setdefault("city", selected_market)
     st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
+    with st.chat_message("user", avatar=":material/person:"):
         st.markdown(prompt)
 
-    with st.chat_message("assistant"):
-        with st.spinner(
-            "Retrieving conditions, running the prediction models, and asking Ollama…"
-        ):
-            result = rag.process_query(prompt)
+    with st.chat_message(
+        "assistant",
+        avatar=":material/business_messages:",
+    ):
+        with st.spinner("Building the investment outlook…"):
+            result = rag.process_query(prompt, context=context)
         render_analysis(result)
 
     st.session_state.messages.append({"role": "assistant", "result": result})
