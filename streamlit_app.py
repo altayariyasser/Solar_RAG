@@ -1,48 +1,92 @@
-"""Streamlit entrypoint for the Solar Project RAG app."""
+"""Conversational Streamlit entrypoint for the Solar Project RAG app."""
+
+from __future__ import annotations
+
+from typing import Any, Dict
 
 import pandas as pd
-import plotly.graph_objects as go
 import streamlit as st
 
 from rag import SolarRAG
 
 
-APP_BUILD = "2026-07-25-ollama-cloud"
+APP_BUILD = "2026-07-25-conversational-rag"
+
+SUGGESTIONS = {
+    ":blue[:material/partly_cloudy_day:] Riyadh weather": (
+        "What was the weather in Riyadh on 2024-02-02?"
+    ),
+    ":orange[:material/solar_power:] Jeddah solar energy": (
+        "How much solar energy could I get in Jeddah on 2024-06-15?"
+    ),
+    ":green[:material/check_circle:] Medina suitability": (
+        "Was Medina suitable for solar generation on 2024-09-01?"
+    ),
+    ":violet[:material/air:] Dammam combined analysis": (
+        "How were the weather, air quality, and solar potential in Dammam "
+        "on 2024-03-10?"
+    ),
+}
+
+WEATHER_FEATURES = {
+    "temperature_2m_mean": ("Mean temperature", "°C"),
+    "relative_humidity_2m_mean": ("Relative humidity", "%"),
+    "wind_speed_10m_mean": ("Wind speed", "km/h"),
+    "cloud_cover_mean": ("Cloud cover", "%"),
+    "precipitation_sum": ("Precipitation", "mm"),
+    "shortwave_radiation_sum": ("Shortwave radiation", "MJ/m²"),
+    "sunshine_duration": ("Sunshine duration", "seconds"),
+}
+
+AIR_FEATURES = {
+    "pm10": ("PM10", "µg/m³"),
+    "pm2_5": ("PM2.5", "µg/m³"),
+    "carbon_monoxide": ("Carbon monoxide", "µg/m³"),
+    "nitrogen_dioxide": ("Nitrogen dioxide", "µg/m³"),
+    "ozone": ("Ozone", "µg/m³"),
+    "sulphur_dioxide": ("Sulphur dioxide", "µg/m³"),
+}
 
 
 st.set_page_config(
-    page_title="Solar Project RAG",
+    page_title="Solar RAG assistant",
     page_icon="☀️",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-st.markdown(
-    """
-    <style>
-        .block-container {padding-top: 2rem; padding-bottom: 3rem;}
-        [data-testid="stMetric"] {
-            background: rgba(255, 184, 0, 0.08);
-            border: 1px solid rgba(255, 184, 0, 0.22);
-            border-radius: 0.8rem;
-            padding: 1rem;
-        }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+
+def get_secret(name: str, default: str = "") -> str:
+    """Read a root-level Streamlit secret without exposing it in the UI."""
+    try:
+        value = st.secrets.get(name, default)
+    except Exception:
+        value = default
+    return str(value).strip()
 
 
 @st.cache_resource(show_spinner=False)
-def initialize_rag_ollama_cloud() -> SolarRAG:
-    """Load the dataset once; ML training is deferred until the first query."""
-    system = SolarRAG()
+def initialize_rag(
+    ollama_api_key: str,
+    ollama_host: str,
+    ollama_model: str,
+) -> SolarRAG:
+    """Load the dataset once and rebuild the resource when configuration changes."""
+    system = SolarRAG(
+        ollama_api_key=ollama_api_key,
+        ollama_host=ollama_host,
+        ollama_model=ollama_model,
+    )
     system.setup()
     return system
 
 
+ollama_api_key = get_secret("OLLAMA_API_KEY")
+ollama_host = get_secret("OLLAMA_HOST", "https://ollama.com")
+ollama_model = get_secret("OLLAMA_MODEL", "gpt-oss:20b")
+
 try:
-    rag = initialize_rag_ollama_cloud()
+    rag = initialize_rag(ollama_api_key, ollama_host, ollama_model)
 except Exception as exc:
     st.error("The app could not load its dataset.")
     st.code(str(exc))
@@ -53,158 +97,200 @@ except Exception as exc:
     st.stop()
 
 
-def aqi_color(value: float) -> str:
-    if value < 50:
-        return "#2e9d50"
-    if value < 100:
-        return "#e3a008"
-    return "#d14343"
+st.session_state.setdefault("messages", [])
 
 
-def set_example(query: str) -> None:
-    st.session_state["input_method"] = "Natural language"
-    st.session_state["natural_query"] = query
+def format_measurement(value: Any, unit: str) -> str:
+    """Format a numeric measurement for the result tables."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    precision = 0 if unit in {"%", "seconds"} else 1
+    return f"{number:.{precision}f} {unit}".strip()
 
 
-st.title("☀️ Solar Project RAG")
-st.caption(
-    "Explore historical solar-generation and air-quality conditions across five Saudi cities."
-)
-st.caption(f"Build: {APP_BUILD}")
+def measurement_table(data: Dict, features: Dict[str, tuple[str, str]]) -> pd.DataFrame:
+    """Build a display-safe table from selected retrieved features."""
+    rows = []
+    for key, (label, unit) in features.items():
+        if data.get(key) is not None:
+            rows.append(
+                {
+                    "Measurement": label,
+                    "Observed value": format_measurement(data[key], unit),
+                }
+            )
+    return pd.DataFrame(rows)
 
-with st.sidebar:
-    st.header("Query")
-    mode = st.radio(
-        "Input method",
-        ["Structured", "Natural language"],
-        key="input_method",
-    )
 
-    if mode == "Structured":
-        selected_city = st.selectbox("City", rag.data_loader.cities)
-        selected_date = st.date_input(
-            "Date",
-            value=rag.data_loader.min_date,
-            min_value=rag.data_loader.min_date,
-            max_value=rag.data_loader.max_date,
+def render_analysis(result: Dict) -> None:
+    """Render one complete RAG answer inside an assistant chat message."""
+    if result.get("status") != "success":
+        st.error(result.get("error", "The question could not be processed."))
+        st.caption(
+            "Include one supported city and a historical date, such as "
+            "`Riyadh 2024-02-02`."
         )
-        user_query = (
-            f"Solar and air quality conditions in {selected_city} "
-            f"on {selected_date:%Y-%m-%d}"
+        return
+
+    predictions = result["predictions"]
+    data = result["data"]
+    llm_status = result.get("llm_status")
+
+    st.markdown("#### Ollama RAG explanation")
+    if llm_status == "ollama_cloud":
+        st.caption(
+            f":material/smart_toy: Generated by Ollama Cloud "
+            f"(`{ollama_model}`) from retrieved data, ML predictions, and knowledge."
+        )
+    elif llm_status == "not_configured":
+        st.warning(
+            "Ollama Cloud is not configured. Showing the built-in grounded RAG "
+            "summary instead."
         )
     else:
-        user_query = st.text_area(
-            "Question",
-            key="natural_query",
-            placeholder="Solar conditions in Riyadh on 2024-01-15",
-            height=120,
+        st.warning(
+            "Ollama Cloud could not generate this answer. Showing the built-in "
+            "grounded RAG summary instead."
+        )
+        if result.get("llm_error"):
+            st.caption(result["llm_error"])
+
+    st.markdown(result["llm_response"])
+
+    st.markdown("#### Model results")
+    with st.container(horizontal=True):
+        st.metric(
+            "Estimated daily solar energy",
+            f"{predictions['solar_output_kwh']:.1f} kWh",
+            border=True,
+        )
+        st.metric(
+            "Predicted AQI",
+            f"{predictions['aqi_value']:.0f}",
+            border=True,
+        )
+        st.metric(
+            "Air-quality risk",
+            predictions["aqi_risk_level"],
+            border=True,
         )
 
-    execute = st.button("Run query", type="primary", use_container_width=True)
-    st.caption(
-        f"Dataset: {rag.data_loader.min_date} to {rag.data_loader.max_date}"
-    )
-
-
-if execute:
-    if not user_query.strip():
-        st.warning("Enter a question first.")
-    else:
-        with st.spinner("Running retrieval and prediction… The first query trains compact models once."):
-            result = rag.process_query(user_query)
-
-        if result["status"] != "success":
-            st.error(result.get("error", "The query could not be processed."))
-        else:
-            predictions = result["predictions"]
-            aqi = predictions["aqi_value"]
-            solar = predictions["solar_output_kwh"]
-            risk = predictions["aqi_risk_level"]
-
-            metric_1, metric_2, metric_3 = st.columns(3)
-            metric_1.metric("Estimated solar output", f"{solar:.1f} kWh")
-            metric_2.metric("Predicted AQI", f"{aqi:.0f}")
-            metric_3.metric("Air-quality risk", risk)
-
-            overview, conditions, insights = st.tabs(
-                ["Overview", "Retrieved conditions", "RAG insights"]
+    weather_column, air_column = st.columns(2)
+    with weather_column:
+        with st.container(border=True):
+            st.markdown("**Retrieved weather features**")
+            st.dataframe(
+                measurement_table(data, WEATHER_FEATURES),
+                hide_index=True,
+                width="stretch",
             )
 
-            with overview:
-                chart = go.Figure(
-                    go.Indicator(
-                        mode="gauge+number",
-                        value=aqi,
-                        title={"text": "Air Quality Index"},
-                        gauge={
-                            "axis": {"range": [0, 300]},
-                            "bar": {"color": aqi_color(aqi)},
-                            "steps": [
-                                {"range": [0, 50], "color": "#d9f2df"},
-                                {"range": [50, 100], "color": "#fff1c2"},
-                                {"range": [100, 300], "color": "#f7d5d5"},
-                            ],
-                        },
-                    )
-                )
-                chart.update_layout(height=360, margin=dict(l=30, r=30, t=70, b=20))
-                st.plotly_chart(chart, use_container_width=True)
-                if result.get("llm_status") == "ollama_cloud":
-                    st.caption("Explanation generated by Ollama Cloud.")
-                elif result.get("llm_status") == "unavailable":
-                    st.caption(
-                        "Ollama Cloud was unavailable, so the built-in explanation is shown."
-                    )
-                else:
-                    st.caption(
-                        "Add OLLAMA_API_KEY to Streamlit Secrets to enable Ollama Cloud."
-                    )
-                st.success(result["llm_response"])
+    with air_column:
+        with st.container(border=True):
+            st.markdown("**Retrieved air-quality features**")
+            st.dataframe(
+                measurement_table(data, AIR_FEATURES),
+                hide_index=True,
+                width="stretch",
+            )
 
-            with conditions:
-                feature_labels = {
-                    "temperature_2m_mean": "Mean temperature",
-                    "relative_humidity_2m_mean": "Relative humidity",
-                    "wind_speed_10m_mean": "Wind speed",
-                    "cloud_cover_mean": "Cloud cover",
-                    "precipitation_sum": "Precipitation",
-                    "shortwave_radiation_sum": "Shortwave radiation",
-                    "sunshine_duration": "Sunshine duration",
-                    "pm10": "PM10",
-                    "pm2_5": "PM2.5",
-                    "carbon_monoxide": "Carbon monoxide",
-                    "nitrogen_dioxide": "Nitrogen dioxide",
-                    "ozone": "Ozone",
-                    "sulphur_dioxide": "Sulphur dioxide",
-                }
-                rows = [
-                    {"Feature": label, "Value": result["data"].get(key)}
-                    for key, label in feature_labels.items()
-                    if key in result["data"]
-                ]
-                st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    with st.expander("Knowledge retrieved for this answer"):
+        for item in result["interpretations"]:
+            st.markdown(f"- {item}")
 
-            with insights:
-                for insight in result["interpretations"]:
-                    st.info(insight)
-
-else:
-    st.subheader("Try an example")
-    examples = [
-        ("Riyadh", "Solar conditions in Riyadh on 2024-01-15"),
-        ("Jeddah", "Air quality and solar output in Jeddah on 2024-06-15"),
-        ("Dammam", "Weather and solar conditions in Dammam on 2024-09-01"),
-    ]
-    columns = st.columns(len(examples))
-    for column, (label, query) in zip(columns, examples):
-        column.button(
-            label,
-            on_click=set_example,
-            args=(query,),
-            use_container_width=True,
+    with st.expander("How this answer was produced"):
+        st.markdown(
+            "1. The question parser identifies the city, date, and requested topics.\n"
+            "2. The app retrieves that city-day's historical weather and pollution "
+            "features from the project dataset.\n"
+            "3. The trained models estimate daily solar output and AQI.\n"
+            "4. TF-IDF retrieval selects relevant solar and air-quality knowledge.\n"
+            "5. Ollama Cloud receives only that grounded context and writes the final "
+            "explanation."
+        )
+        st.caption(
+            "The dataset covers historical 2024 observations. Results are analytical "
+            "estimates, not a live weather forecast or a guaranteed PV system yield."
         )
 
-    st.info(
-        "This app uses the repository's 2024 historical dataset. "
-        "Choose a date in that range; it is not a live forecast service."
+
+st.title("Solar RAG assistant")
+st.caption(
+    "Ask about historical weather, solar-energy potential, air quality, or solar "
+    "suitability across Riyadh, Jeddah, Mecca, Medina, and Dammam."
+)
+
+with st.sidebar:
+    st.header("System status")
+    if rag.explainer.configured:
+        st.success(f"Ollama Cloud configured\n\nModel: `{rag.explainer.model}`")
+    else:
+        st.warning("Ollama Cloud API key is not configured.")
+
+    st.markdown("**Available data**")
+    st.write(f"{rag.data_loader.min_date} to {rag.data_loader.max_date}")
+    st.write(", ".join(rag.data_loader.cities))
+
+    st.markdown("**Supported questions**")
+    st.caption(
+        "Weather conditions · estimated solar energy · air quality · "
+        "solar suitability · combined analysis"
     )
+
+    if st.button(
+        "Clear conversation",
+        icon=":material/delete_sweep:",
+        width="stretch",
+        disabled=not st.session_state.messages,
+    ):
+        st.session_state.messages = []
+        st.rerun()
+
+    st.caption(f"Build: {APP_BUILD}")
+
+
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        if message["role"] == "user":
+            st.markdown(message["content"])
+        else:
+            render_analysis(message["result"])
+
+
+selected_suggestion = None
+if not st.session_state.messages:
+    st.info(
+        "Ask a natural-language question that includes a supported city and a "
+        "date from 2024."
+    )
+    selected_suggestion = st.pills(
+        "Try asking",
+        list(SUGGESTIONS),
+        selection_mode="single",
+        label_visibility="collapsed",
+    )
+
+
+prompt = st.chat_input(
+    "Ask about weather, solar energy, air quality, or site suitability…",
+    submit_mode="disable",
+)
+if selected_suggestion:
+    prompt = SUGGESTIONS[selected_suggestion]
+
+
+if prompt:
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+    with st.chat_message("assistant"):
+        with st.spinner(
+            "Retrieving conditions, running the prediction models, and asking Ollama…"
+        ):
+            result = rag.process_query(prompt)
+        render_analysis(result)
+
+    st.session_state.messages.append({"role": "assistant", "result": result})
