@@ -10,6 +10,19 @@ APP_FILE = Path(__file__).resolve().parents[1] / "streamlit_app.py"
 
 
 class StreamlitConversationTests(unittest.TestCase):
+    def test_market_selector_updates_the_city_profile(self):
+        app = AppTest.from_file(str(APP_FILE))
+        app.run(timeout=30)
+
+        self.assertFalse(list(app.exception))
+        self.assertEqual(app.selectbox[0].value, "Riyadh")
+
+        app.selectbox[0].set_value("Jeddah").run(timeout=30)
+
+        self.assertFalse(list(app.exception))
+        headings = " ".join(str(element.value) for element in app.subheader)
+        self.assertIn("Jeddah seasonal profile", headings)
+
     def test_chat_question_renders_explanation_and_model_results(self):
         app = AppTest.from_file(str(APP_FILE))
         app.run(timeout=30)
@@ -22,11 +35,13 @@ class StreamlitConversationTests(unittest.TestCase):
         ).run(timeout=60)
 
         self.assertFalse(list(app.exception))
-        rendered_markdown = " ".join(
-            str(element.value) for element in app.markdown
+        rendered_text = " ".join(
+            str(element.value)
+            for collection in (app.markdown, app.subheader)
+            for element in collection
         )
-        self.assertIn("Ollama RAG explanation", rendered_markdown)
-        self.assertIn("Model results", rendered_markdown)
+        self.assertIn("Executive outlook", rendered_text)
+        self.assertIn("Key results", rendered_text)
         self.assertGreaterEqual(len(app.metric), 3)
 
 
