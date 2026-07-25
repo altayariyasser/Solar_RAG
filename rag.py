@@ -219,8 +219,14 @@ class ModelTrainer:
         if not self.train_models():
             return {}
 
-        values = np.array(
-            [[float(feature_dict.get(name, 0) or 0) for name in self.feature_names]]
+        values = pd.DataFrame(
+            [
+                {
+                    name: float(feature_dict.get(name, 0) or 0)
+                    for name in self.feature_names
+                }
+            ],
+            columns=self.feature_names,
         )
         scaled = self.scaler.transform(values)
         risk_names = {0: "Good", 1: "Moderate", 2: "Unhealthy"}
@@ -242,12 +248,18 @@ class KnowledgeBase:
             "Solar output above 150 kWh indicates strong generation conditions.",
             "Solar output between 80 and 150 kWh indicates moderate generation conditions.",
             "Solar output below 80 kWh can result from cloud, dust, or weak radiation.",
+            "Higher shortwave radiation and longer sunshine duration usually support more solar generation.",
+            "Cloud cover and precipitation can reduce the solar energy available to photovoltaic panels.",
+            "Strong wind can cool solar panels, but very high wind may require operational precautions.",
+            "Photovoltaic modules commonly lose conversion efficiency as cell temperature rises.",
             "AQI below 50 indicates good air quality and minimal health risk.",
             "AQI from 50 to 100 indicates moderate air quality.",
             "AQI above 100 is unhealthy and outdoor exposure should be reduced.",
             "High cloud cover can significantly reduce solar radiation and panel output.",
             "Dust and airborne particles can reduce panel efficiency and worsen air quality.",
             "High temperatures may reduce photovoltaic conversion efficiency.",
+            "A site assessment should consider radiation, cloud cover, heat, dust, shading, panel area, tilt, and system efficiency.",
+            "The predicted daily energy is a model estimate for configurations represented in the training dataset, not a guaranteed system yield.",
         ]
         self.vectorizer = TfidfVectorizer(stop_words="english")
         self.embeddings = self.vectorizer.fit_transform(self.knowledge_items)
@@ -280,10 +292,17 @@ class OllamaExplainer:
         "sulphur_dioxide",
     ]
 
-    def __init__(self):
-        self.api_key = os.getenv("OLLAMA_API_KEY", "").strip()
-        self.host = os.getenv("OLLAMA_HOST", self.DEFAULT_HOST).strip().rstrip("/")
-        self.model = os.getenv("OLLAMA_MODEL", self.DEFAULT_MODEL).strip()
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        host: Optional[str] = None,
+        model: Optional[str] = None,
+    ):
+        self.api_key = (api_key or os.getenv("OLLAMA_API_KEY", "")).strip()
+        self.host = (
+            host or os.getenv("OLLAMA_HOST", self.DEFAULT_HOST)
+        ).strip().rstrip("/")
+        self.model = (model or os.getenv("OLLAMA_MODEL", self.DEFAULT_MODEL)).strip()
 
     @property
     def configured(self) -> bool:
@@ -297,9 +316,10 @@ class OllamaExplainer:
         data: Dict,
         predictions: Dict,
         interpretations: List[str],
-    ) -> Tuple[Optional[str], str]:
+        intents: List[str],
+    ) -> Tuple[Optional[str], str, Optional[str]]:
         if not self.configured:
-            return None, "not_configured"
+            return None, "not_configured", None
 
         observed = {
             key: data.get(key)
@@ -308,15 +328,19 @@ class OllamaExplainer:
         }
         prompt = (
             f"User question: {user_query}\n"
+            f"Detected topics: {', '.join(intents)}\n"
             f"Location and date: {city}, {date_str}\n"
             f"Observed measurements: {json.dumps(observed, default=str)}\n"
             f"Model predictions: {json.dumps(predictions, default=str)}\n"
             "Retrieved domain guidance:\n- "
             + "\n- ".join(interpretations)
-            + "\n\nExplain the solar-generation and air-quality conditions in no more "
-            "than 160 words. Connect the measurements to the predictions, mention "
-            "important uncertainty, and give one practical recommendation. Use only "
-            "the supplied facts and do not describe historical data as a live forecast."
+            + "\n\nAnswer the user's exact question first, then connect the relevant "
+            "weather observations to the solar-energy and air-quality predictions. "
+            "If the user asks whether the location is suitable for solar, discuss both "
+            "supporting and limiting factors. Include the predicted daily solar energy "
+            "when relevant. Use no more than 220 words, mention important uncertainty, "
+            "and give one practical recommendation. Use only the supplied facts. This "
+            "is historical analysis, so never describe it as a live forecast."
         )
         payload = {
             "model": self.model,
@@ -348,25 +372,95 @@ class OllamaExplainer:
                 body = json.loads(response.read().decode("utf-8"))
             explanation = str(body.get("message", {}).get("content", "")).strip()
             if explanation:
-                return explanation, "ollama_cloud"
+                return explanation, "ollama_cloud", None
+        except urllib.error.HTTPError as exc:
+            return (
+                None,
+                "unavailable",
+                f"Ollama Cloud returned HTTP {exc.code}. Check the API key, model, and free-tier limits.",
+            )
         except (
             json.JSONDecodeError,
             OSError,
             TimeoutError,
             urllib.error.URLError,
-        ):
-            pass
-        return None, "unavailable"
+        ) as exc:
+            return (
+                None,
+                "unavailable",
+                f"Ollama Cloud request failed: {type(exc).__name__}.",
+            )
+        return None, "unavailable", "Ollama Cloud returned an empty explanation."
 
 
 class SolarRAG:
     """Combine dataset retrieval, compact ML predictions, and local RAG context."""
 
-    def __init__(self, dataset_path: Optional[Path] = None):
+    INTENT_KEYWORDS = {
+        "weather": {
+            "weather",
+            "temperature",
+            "hot",
+            "cold",
+            "humidity",
+            "wind",
+            "rain",
+            "cloud",
+            "sunshine",
+        },
+        "solar energy": {
+            "solar",
+            "energy",
+            "electricity",
+            "power",
+            "output",
+            "generation",
+            "kwh",
+            "panel",
+            "photovoltaic",
+            "pv",
+        },
+        "air quality": {
+            "air",
+            "aqi",
+            "pollution",
+            "pm10",
+            "pm2.5",
+            "dust",
+            "healthy",
+            "health",
+        },
+        "solar suitability": {
+            "suitable",
+            "suitability",
+            "good location",
+            "best",
+            "recommend",
+            "worth",
+            "feasible",
+        },
+    }
+
+    CITY_ALIASES = {
+        "makkah": "Mecca",
+        "madinah": "Medina",
+    }
+
+    def __init__(
+        self,
+        dataset_path: Optional[Path] = None,
+        ollama_api_key: Optional[str] = None,
+        ollama_host: Optional[str] = None,
+        ollama_model: Optional[str] = None,
+    ):
         self.data_loader = DataLoader(dataset_path)
         self.trainer = ModelTrainer(self.data_loader)
         self.kb = KnowledgeBase()
-        self.explainer = OllamaExplainer()
+        self.explainer = OllamaExplainer(
+            api_key=ollama_api_key,
+            host=ollama_host,
+            model=ollama_model,
+        )
         self.ready = False
 
     def setup(self) -> bool:
@@ -375,20 +469,36 @@ class SolarRAG:
 
     def process_query(self, user_query: str) -> Dict:
         city, date_str = self._extract_location_date(user_query)
+        intents = self._detect_intents(user_query)
         result = {
             "query": user_query,
             "status": "processing",
             "data": None,
             "predictions": {},
             "interpretations": [],
+            "intents": intents,
+            "city": city,
+            "date": date_str,
             "llm_response": None,
             "llm_status": "not_configured",
+            "llm_error": None,
         }
 
         if not city:
             result.update(
                 status="error",
                 error=f"Choose one of: {', '.join(self.data_loader.cities)}.",
+            )
+            return result
+
+        if not date_str:
+            result.update(
+                status="error",
+                error=(
+                    "Include a date in your question, for example 2024-02-02. "
+                    f"Available dates are {self.data_loader.min_date} through "
+                    f"{self.data_loader.max_date}."
+                ),
             )
             return result
 
@@ -410,23 +520,26 @@ class SolarRAG:
             return result
 
         query_context = (
-            f"solar weather air quality AQI {city} "
+            f"{user_query} {' '.join(intents)} {city} "
             f"{predictions['solar_output_kwh']:.1f} {predictions['aqi_value']:.1f}"
         )
-        interpretations = self.kb.retrieve(query_context)
-        fallback_summary = (
-            f"For {city} on {date_str}, estimated solar output is "
-            f"{predictions['solar_output_kwh']:.1f} kWh and predicted AQI is "
-            f"{predictions['aqi_value']:.0f} ({predictions['aqi_risk_level']}). "
-            f"{interpretations[0]}"
+        interpretations = self.kb.retrieve(query_context, top_k=4)
+        fallback_summary = self._build_fallback_summary(
+            city,
+            date_str,
+            data,
+            predictions,
+            interpretations,
+            intents,
         )
-        llm_response, llm_status = self.explainer.explain(
+        llm_response, llm_status, llm_error = self.explainer.explain(
             user_query,
             city,
             date_str,
             data,
             predictions,
             interpretations,
+            intents,
         )
 
         result.update(
@@ -436,8 +549,78 @@ class SolarRAG:
             interpretations=interpretations,
             llm_response=llm_response or fallback_summary,
             llm_status=llm_status,
+            llm_error=llm_error,
         )
         return result
+
+    @classmethod
+    def _detect_intents(cls, query: str) -> List[str]:
+        normalized = query.lower()
+        intents = [
+            intent
+            for intent, keywords in cls.INTENT_KEYWORDS.items()
+            if any(keyword in normalized for keyword in keywords)
+        ]
+        return intents or ["combined conditions"]
+
+    @staticmethod
+    def _number(data: Dict, key: str) -> Optional[float]:
+        value = data.get(key)
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _build_fallback_summary(
+        self,
+        city: str,
+        date_str: str,
+        data: Dict,
+        predictions: Dict,
+        interpretations: List[str],
+        intents: List[str],
+    ) -> str:
+        temperature = self._number(data, "temperature_2m_mean")
+        humidity = self._number(data, "relative_humidity_2m_mean")
+        wind = self._number(data, "wind_speed_10m_mean")
+        cloud = self._number(data, "cloud_cover_mean")
+        rain = self._number(data, "precipitation_sum")
+
+        weather_parts = []
+        if temperature is not None:
+            weather_parts.append(f"mean temperature {temperature:.1f} °C")
+        if humidity is not None:
+            weather_parts.append(f"humidity {humidity:.0f}%")
+        if wind is not None:
+            weather_parts.append(f"wind {wind:.1f} km/h")
+        if cloud is not None:
+            weather_parts.append(f"cloud cover {cloud:.0f}%")
+        if rain is not None:
+            weather_parts.append(f"precipitation {rain:.1f} mm")
+
+        sentences = [f"For {city} on {date_str}:"]
+        if "weather" in intents or "combined conditions" in intents:
+            sentences.append("Weather observations were " + ", ".join(weather_parts) + ".")
+        if any(
+            intent in intents
+            for intent in ("solar energy", "solar suitability", "combined conditions")
+        ):
+            sentences.append(
+                f"The trained solar model estimates {predictions['solar_output_kwh']:.1f} "
+                "kWh of daily output for configurations represented in the dataset."
+            )
+        if any(
+            intent in intents
+            for intent in ("air quality", "solar suitability", "combined conditions")
+        ):
+            sentences.append(
+                f"The AQI model estimates {predictions['aqi_value']:.0f} "
+                f"({predictions['aqi_risk_level']})."
+            )
+        sentences.append(interpretations[0])
+        return " ".join(sentences)
 
     @staticmethod
     def _clean_values(data: Dict) -> Dict:
@@ -449,22 +632,43 @@ class SolarRAG:
                 cleaned[key] = value
         return cleaned
 
-    def _extract_location_date(self, query: str) -> Tuple[Optional[str], str]:
+    def _extract_location_date(
+        self, query: str
+    ) -> Tuple[Optional[str], Optional[str]]:
         query_lower = query.lower()
         city = next(
             (name for name in self.data_loader.cities if name.lower() in query_lower),
             None,
         )
+        if city is None:
+            city = next(
+                (
+                    canonical
+                    for alias, canonical in self.CITY_ALIASES.items()
+                    if alias in query_lower
+                ),
+                None,
+            )
 
-        match = re.search(r"\b\d{4}-\d{2}-\d{2}\b", query)
+        match = re.search(r"\b\d{4}[-/]\d{1,2}[-/]\d{1,2}\b", query)
         if match:
-            date_str = match.group(0)
+            parsed_date = pd.to_datetime(
+                match.group(0).replace("/", "-"),
+                errors="coerce",
+            )
+            date_str = (
+                parsed_date.strftime("%Y-%m-%d")
+                if not pd.isna(parsed_date)
+                else None
+            )
         elif "tomorrow" in query_lower:
             date_str = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
         elif "yesterday" in query_lower:
             date_str = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-        else:
+        elif "today" in query_lower:
             date_str = datetime.now().strftime("%Y-%m-%d")
+        else:
+            date_str = None
         return city, date_str
 
 
