@@ -6,8 +6,10 @@ import json
 import os
 import re
 import urllib.error
+import urllib.parse
 import urllib.request
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
+from functools import lru_cache
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -22,6 +24,14 @@ from sklearn.preprocessing import StandardScaler
 
 APP_DIR = Path(__file__).resolve().parent
 DEFAULT_DATASET = APP_DIR / "data" / "solar_dataset.csv"
+
+CITY_COORDINATES = {
+    "Riyadh": (24.7136, 46.6753),
+    "Jeddah": (21.5433, 39.1728),
+    "Mecca": (21.3891, 39.8579),
+    "Medina": (24.5247, 39.5692),
+    "Dammam": (26.4207, 50.0888),
+}
 
 
 class DataLoader:
@@ -132,7 +142,188 @@ class DataLoader:
         values = matches.select_dtypes(include=[np.number]).mean().to_dict()
         values["Date"] = target_date.strftime("%Y-%m-%d")
         values["City"] = city.title()
+        values["_source_kind"] = "historical"
+        values["_source_label"] = "Project dataset · historical observation"
+        values["_air_quality_available"] = True
         return values
+
+
+class OpenMeteoClient:
+    """Retrieve model-ready weather and air-quality features by city and date."""
+
+    WEATHER_ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
+    WEATHER_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+    AIR_QUALITY_URL = "https://air-quality-api.open-meteo.com/v1/air-quality"
+    FORECAST_DAYS = 16
+    HOURLY_WEATHER = [
+        "temperature_2m",
+        "relative_humidity_2m",
+        "surface_pressure",
+        "wind_speed_10m",
+        "cloud_cover",
+        "precipitation",
+        "shortwave_radiation",
+        "sunshine_duration",
+    ]
+    HOURLY_AIR = [
+        "pm10",
+        "pm2_5",
+        "carbon_monoxide",
+        "nitrogen_dioxide",
+        "ozone",
+        "sulphur_dioxide",
+    ]
+
+    @staticmethod
+    def _request(url: str, params: Dict) -> Dict:
+        query = urllib.parse.urlencode(params)
+        request = urllib.request.Request(
+            f"{url}?{query}",
+            headers={"User-Agent": "Solar-Decision-Intelligence/1.0"},
+        )
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    @staticmethod
+    def _numbers(values) -> List[float]:
+        return [
+            float(value)
+            for value in (values or [])
+            if value is not None and not pd.isna(value)
+        ]
+
+    @classmethod
+    def _mean(cls, values) -> Optional[float]:
+        numbers = cls._numbers(values)
+        return float(np.mean(numbers)) if numbers else None
+
+    @classmethod
+    def _sum(cls, values) -> Optional[float]:
+        numbers = cls._numbers(values)
+        return float(np.sum(numbers)) if numbers else None
+
+    @property
+    def latest_forecast_date(self) -> date:
+        return datetime.now().date() + timedelta(days=self.FORECAST_DAYS - 1)
+
+    @staticmethod
+    def _display_date(value: date) -> str:
+        return value.strftime("%B %d, %Y").replace(" 0", " ")
+
+    @lru_cache(maxsize=256)
+    def get_features(self, city: str, date_str: str) -> Tuple[Optional[Dict], Optional[str]]:
+        """Return API features or a conversational reason they are unavailable."""
+        coordinates = CITY_COORDINATES.get(city)
+        target = pd.to_datetime(date_str, errors="coerce")
+        if coordinates is None or pd.isna(target):
+            return None, "I could not resolve that location and date."
+
+        target_date = target.date()
+        today = datetime.now().date()
+        if target_date > self.latest_forecast_date:
+            return (
+                None,
+                (
+                    f"I can use live forecast inputs through "
+                    f"{self._display_date(self.latest_forecast_date)}. "
+                    f"{self._display_date(target_date)} is too far ahead for "
+                    "a reliable weather-based prediction."
+                ),
+            )
+
+        is_forecast = target_date >= today
+        use_forecast_api = target_date >= today - timedelta(days=5)
+        weather_url = (
+            self.WEATHER_FORECAST_URL
+            if use_forecast_api
+            else self.WEATHER_ARCHIVE_URL
+        )
+        common = {
+            "latitude": coordinates[0],
+            "longitude": coordinates[1],
+            "start_date": date_str,
+            "end_date": date_str,
+            "timezone": "Asia/Riyadh",
+        }
+
+        try:
+            weather = self._request(
+                weather_url,
+                {**common, "hourly": ",".join(self.HOURLY_WEATHER)},
+            ).get("hourly", {})
+        except (
+            json.JSONDecodeError,
+            OSError,
+            TimeoutError,
+            urllib.error.HTTPError,
+            urllib.error.URLError,
+        ):
+            return (
+                None,
+                (
+                    "I could not reach the live weather service for that date. "
+                    "Please try the same request again in a moment."
+                ),
+            )
+
+        values = {
+            "temperature_2m_mean": self._mean(weather.get("temperature_2m")),
+            "relative_humidity_2m_mean": self._mean(
+                weather.get("relative_humidity_2m")
+            ),
+            "surface_pressure_mean": self._mean(weather.get("surface_pressure")),
+            "wind_speed_10m_mean": self._mean(weather.get("wind_speed_10m")),
+            "cloud_cover_mean": self._mean(weather.get("cloud_cover")),
+            "precipitation_sum": self._sum(weather.get("precipitation")),
+            # Hourly shortwave radiation is W/m². Summing 1-hour values and
+            # multiplying by 0.0036 converts the result to MJ/m².
+            "shortwave_radiation_sum": (
+                self._sum(weather.get("shortwave_radiation")) * 0.0036
+                if self._sum(weather.get("shortwave_radiation")) is not None
+                else None
+            ),
+            "sunshine_duration": self._sum(weather.get("sunshine_duration")),
+        }
+        if values["temperature_2m_mean"] is None:
+            return None, "The weather service returned no usable data for that day."
+
+        air_available = False
+        try:
+            air = self._request(
+                self.AIR_QUALITY_URL,
+                {**common, "hourly": ",".join(self.HOURLY_AIR)},
+            ).get("hourly", {})
+            for feature in self.HOURLY_AIR:
+                feature_value = self._mean(air.get(feature))
+                if feature_value is not None:
+                    values[feature] = feature_value
+                    air_available = True
+        except (
+            json.JSONDecodeError,
+            OSError,
+            TimeoutError,
+            urllib.error.HTTPError,
+            urllib.error.URLError,
+        ):
+            # Weather-only predictions remain useful. Missing pollution
+            # features are filled from training medians by ModelTrainer.
+            pass
+
+        source_kind = "forecast" if is_forecast else "historical"
+        values.update(
+            {
+                "Date": date_str,
+                "City": city,
+                "_source_kind": source_kind,
+                "_source_label": (
+                    "Open-Meteo · forecast inputs"
+                    if is_forecast
+                    else "Open-Meteo · historical weather"
+                ),
+                "_air_quality_available": air_available,
+            }
+        )
+        return values, None
 
 
 class ModelTrainer:
@@ -164,6 +355,7 @@ class ModelTrainer:
         self.model_aqi_class: Optional[RandomForestClassifier] = None
         self.scaler = StandardScaler()
         self.feature_names: List[str] = []
+        self.feature_medians: Dict[str, float] = {}
         self._trained = False
 
     def train_models(self) -> bool:
@@ -184,6 +376,10 @@ class ModelTrainer:
 
         training = frame[self.feature_names + list(required_targets)].copy()
         training = training.apply(pd.to_numeric, errors="coerce")
+        medians = training[self.feature_names].median(numeric_only=True)
+        self.feature_medians = {
+            name: float(medians.get(name, 0) or 0) for name in self.feature_names
+        }
         training = training.fillna(training.median(numeric_only=True)).dropna()
         if len(training) > 6000:
             training = training.sample(6000, random_state=42)
@@ -222,7 +418,11 @@ class ModelTrainer:
         values = pd.DataFrame(
             [
                 {
-                    name: float(feature_dict.get(name, 0) or 0)
+                    name: float(
+                        feature_dict.get(name)
+                        if feature_dict.get(name) is not None
+                        else self.feature_medians.get(name, 0)
+                    )
                     for name in self.feature_names
                 }
             ],
@@ -326,11 +526,16 @@ class OllamaExplainer:
             for key in self.CONTEXT_FEATURES
             if data.get(key) is not None
         }
+        source_kind = data.get("_source_kind", "historical")
+        evidence_label = (
+            "forecast inputs" if source_kind == "forecast" else "historical inputs"
+        )
         prompt = (
             f"User question: {user_query}\n"
             f"Detected topics: {', '.join(intents)}\n"
             f"Location and date: {city}, {date_str}\n"
-            f"Observed measurements: {json.dumps(observed, default=str)}\n"
+            f"Evidence type: {evidence_label}\n"
+            f"Weather and air-quality features: {json.dumps(observed, default=str)}\n"
             f"Model predictions: {json.dumps(predictions, default=str)}\n"
             "Retrieved domain guidance:\n- "
             + "\n- ".join(interpretations)
@@ -339,8 +544,8 @@ class OllamaExplainer:
             "If the user asks whether the location is suitable for solar, discuss both "
             "supporting and limiting factors. Include the predicted daily solar energy "
             "when relevant. Use no more than 220 words, mention important uncertainty, "
-            "and give one practical recommendation. Use only the supplied facts. This "
-            "is historical analysis, so never describe it as a live forecast."
+            "and give one practical recommendation. Use only the supplied facts. "
+            "Accurately distinguish forecast inputs from historical observations."
         )
         payload = {
             "model": self.model,
@@ -454,6 +659,7 @@ class SolarRAG:
         ollama_model: Optional[str] = None,
     ):
         self.data_loader = DataLoader(dataset_path)
+        self.live_data = OpenMeteoClient()
         self.trainer = ModelTrainer(self.data_loader)
         self.kb = KnowledgeBase()
         self.explainer = OllamaExplainer(
@@ -467,9 +673,18 @@ class SolarRAG:
         self.ready = self.data_loader.load_datasets()
         return self.ready
 
-    def process_query(self, user_query: str) -> Dict:
+    def process_query(
+        self,
+        user_query: str,
+        context: Optional[Dict] = None,
+    ) -> Dict:
         city, date_str = self._extract_location_date(user_query)
         intents = self._detect_intents(user_query)
+        context = context or {}
+        city = city or context.get("city")
+        date_str = date_str or context.get("date")
+        if intents == ["combined conditions"] and context.get("intents"):
+            intents = context["intents"]
         result = {
             "query": user_query,
             "status": "processing",
@@ -487,7 +702,10 @@ class SolarRAG:
         if not city:
             result.update(
                 status="error",
-                error=f"Choose one of: {', '.join(self.data_loader.cities)}.",
+                error=(
+                    "Which location would you like me to analyse? I currently cover "
+                    f"{', '.join(self.data_loader.cities)}."
+                ),
             )
             return result
 
@@ -495,24 +713,19 @@ class SolarRAG:
             result.update(
                 status="error",
                 error=(
-                    "Include a date in your question, for example 2024-02-02. "
-                    f"Available dates are {self.data_loader.min_date} through "
-                    f"{self.data_loader.max_date}."
+                    f"What date should I use for {city}? You can write it naturally, "
+                    "for example “February 2, 2026”, “2 February 2026”, "
+                    "“tomorrow”, or “last Friday”."
                 ),
             )
             return result
 
         data = self.data_loader.get_data_for_location_date(city, date_str)
         if not data:
-            result.update(
-                status="error",
-                error=(
-                    f"No data found for {city} on {date_str}. "
-                    f"Available dates are {self.data_loader.min_date} through "
-                    f"{self.data_loader.max_date}."
-                ),
-            )
-            return result
+            data, live_error = self.live_data.get_features(city, date_str)
+            if not data:
+                result.update(status="error", error=live_error)
+                return result
 
         predictions = self.trainer.predict(data)
         if not predictions:
@@ -550,6 +763,9 @@ class SolarRAG:
             llm_response=llm_response or fallback_summary,
             llm_status=llm_status,
             llm_error=llm_error,
+            source_label=data.get("_source_label", "Model inputs"),
+            source_kind=data.get("_source_kind", "historical"),
+            air_quality_available=data.get("_air_quality_available", True),
         )
         return result
 
@@ -600,9 +816,17 @@ class SolarRAG:
         if rain is not None:
             weather_parts.append(f"precipitation {rain:.1f} mm")
 
-        sentences = [f"For {city} on {date_str}:"]
+        source_kind = data.get("_source_kind", "historical")
+        date_label = datetime.strptime(date_str, "%Y-%m-%d").strftime("%B %d, %Y")
+        date_label = date_label.replace(" 0", " ")
+        sentences = [f"For {city} on {date_label}:"]
         if "weather" in intents or "combined conditions" in intents:
-            sentences.append("Weather observations were " + ", ".join(weather_parts) + ".")
+            weather_noun = (
+                "Forecast conditions are"
+                if source_kind == "forecast"
+                else "Weather conditions were"
+            )
+            sentences.append(f"{weather_noun} " + ", ".join(weather_parts) + ".")
         if any(
             intent in intents
             for intent in ("solar energy", "solar suitability", "combined conditions")
@@ -650,26 +874,123 @@ class SolarRAG:
                 None,
             )
 
-        match = re.search(r"\b\d{4}[-/]\d{1,2}[-/]\d{1,2}\b", query)
-        if match:
-            parsed_date = pd.to_datetime(
-                match.group(0).replace("/", "-"),
-                errors="coerce",
-            )
-            date_str = (
-                parsed_date.strftime("%Y-%m-%d")
-                if not pd.isna(parsed_date)
-                else None
-            )
-        elif "tomorrow" in query_lower:
-            date_str = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
-        elif "yesterday" in query_lower:
-            date_str = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-        elif "today" in query_lower:
-            date_str = datetime.now().strftime("%Y-%m-%d")
-        else:
-            date_str = None
+        date_str = self._extract_date(query)
         return city, date_str
+
+    @staticmethod
+    def _valid_date(year: int, month: int, day: int) -> Optional[str]:
+        try:
+            return date(year, month, day).strftime("%Y-%m-%d")
+        except ValueError:
+            return None
+
+    @classmethod
+    def _extract_date(cls, query: str) -> Optional[str]:
+        """Understand common conversational date expressions without dependencies."""
+        normalized = query.lower().replace("’", "'")
+        today = datetime.now().date()
+
+        relative_days = {
+            "day after tomorrow": 2,
+            "day before yesterday": -2,
+            "tomorrow": 1,
+            "yesterday": -1,
+            "today": 0,
+        }
+        for phrase, offset in relative_days.items():
+            if phrase in normalized:
+                return (today + timedelta(days=offset)).strftime("%Y-%m-%d")
+
+        relative_match = re.search(
+            r"\b(?:in\s+(\d+)\s+days?|(\d+)\s+days?\s+ago)\b",
+            normalized,
+        )
+        if relative_match:
+            amount = int(relative_match.group(1) or relative_match.group(2))
+            if relative_match.group(2):
+                amount *= -1
+            return (today + timedelta(days=amount)).strftime("%Y-%m-%d")
+
+        weekdays = {
+            "monday": 0,
+            "tuesday": 1,
+            "wednesday": 2,
+            "thursday": 3,
+            "friday": 4,
+            "saturday": 5,
+            "sunday": 6,
+        }
+        weekday_match = re.search(
+            r"\b(next|last|this)\s+(" + "|".join(weekdays) + r")\b",
+            normalized,
+        )
+        if weekday_match:
+            direction, weekday = weekday_match.groups()
+            target_weekday = weekdays[weekday]
+            if direction == "last":
+                delta = -((today.weekday() - target_weekday) % 7 or 7)
+            elif direction == "next":
+                delta = (target_weekday - today.weekday()) % 7 or 7
+            else:
+                delta = (target_weekday - today.weekday()) % 7
+            return (today + timedelta(days=delta)).strftime("%Y-%m-%d")
+
+        iso_match = re.search(r"\b(\d{4})[-/](\d{1,2})[-/](\d{1,2})\b", normalized)
+        if iso_match:
+            return cls._valid_date(*(int(part) for part in iso_match.groups()))
+
+        numeric_match = re.search(
+            r"\b(\d{1,2})[./-](\d{1,2})[./-](\d{4})\b",
+            normalized,
+        )
+        if numeric_match:
+            day, month, year = (int(part) for part in numeric_match.groups())
+            return cls._valid_date(year, month, day)
+
+        months = {
+            "january": 1,
+            "jan": 1,
+            "february": 2,
+            "feb": 2,
+            "march": 3,
+            "mar": 3,
+            "april": 4,
+            "apr": 4,
+            "may": 5,
+            "june": 6,
+            "jun": 6,
+            "july": 7,
+            "jul": 7,
+            "august": 8,
+            "aug": 8,
+            "september": 9,
+            "sep": 9,
+            "sept": 9,
+            "october": 10,
+            "oct": 10,
+            "november": 11,
+            "nov": 11,
+            "december": 12,
+            "dec": 12,
+        }
+        month_names = "|".join(sorted(months, key=len, reverse=True))
+        month_first = re.search(
+            rf"\b({month_names})\s+(\d{{1,2}})(?:st|nd|rd|th)?(?:,)?\s+(\d{{4}})\b",
+            normalized,
+        )
+        if month_first:
+            month_name, day, year = month_first.groups()
+            return cls._valid_date(int(year), months[month_name], int(day))
+
+        day_first = re.search(
+            rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\s+(?:of\s+)?"
+            rf"({month_names})(?:,)?\s+(\d{{4}})\b",
+            normalized,
+        )
+        if day_first:
+            day, month_name, year = day_first.groups()
+            return cls._valid_date(int(year), months[month_name], int(day))
+        return None
 
 
 def main():
