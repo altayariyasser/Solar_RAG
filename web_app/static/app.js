@@ -11,6 +11,10 @@ const sourceBadge = document.querySelector("#sourceBadge");
 const toast = document.querySelector("#toast");
 
 let context = {};
+const API_BASE =
+  window.location.hostname === "altayariyasser.github.io"
+    ? "https://solar-rag.onrender.com"
+    : "";
 
 const weatherFields = {
   temperature_2m_mean: ["Mean temperature", "°C", 1],
@@ -153,7 +157,7 @@ async function runAnalysis(question) {
   input.disabled = true;
 
   try {
-    const response = await fetch("/api/analyze", {
+    const response = await fetch(`${API_BASE}/api/analyze`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ question, context }),
@@ -182,7 +186,7 @@ async function runAnalysis(question) {
     typing.remove();
     addMessage(
       "assistant",
-      "The dashboard could not reach the analysis service. Confirm that the Python server is running.",
+      "The model service is starting or temporarily unavailable. On the free service, the first request can take about one minute—please try again shortly.",
       "error",
     );
   } finally {

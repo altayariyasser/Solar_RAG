@@ -30,6 +30,10 @@ from rag_saved_models import SavedModelSolarRAG  # noqa: E402
 
 RAG: Optional[SavedModelSolarRAG] = None
 RAG_LOCK = threading.RLock()
+ALLOWED_ORIGIN = os.getenv(
+    "SOLAR_ALLOWED_ORIGIN",
+    "https://altayariyasser.github.io",
+).rstrip("/")
 
 
 def get_rag() -> SavedModelSolarRAG:
@@ -174,6 +178,27 @@ class SolarIQHandler(SimpleHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
+
+    def end_headers(self) -> None:
+        """Allow the public GitHub Pages dashboard to call this API."""
+        origin = self.headers.get("Origin", "").rstrip("/")
+        if ALLOWED_ORIGIN == "*" or origin == ALLOWED_ORIGIN:
+            self.send_header(
+                "Access-Control-Allow-Origin",
+                "*" if ALLOWED_ORIGIN == "*" else ALLOWED_ORIGIN,
+            )
+            self.send_header("Vary", "Origin")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        super().end_headers()
+
+    def do_OPTIONS(self) -> None:
+        if urlparse(self.path).path == "/api/analyze":
+            self.send_response(HTTPStatus.NO_CONTENT)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        self.send_error(HTTPStatus.NOT_FOUND)
 
     def do_GET(self) -> None:
         path = urlparse(self.path).path

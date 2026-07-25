@@ -22,6 +22,7 @@ Optional environment variables:
 
 - `PORT`: server port, default `8000`
 - `SOLAR_WEB_HOST`: bind address, default `127.0.0.1`
+- `SOLAR_ALLOWED_ORIGIN`: browser origin allowed to call the API
 - `OLLAMA_API_KEY`: enables the optional generated explanation
 - `OLLAMA_HOST`: defaults to `https://ollama.com`
 - `OLLAMA_MODEL`: defaults to `gpt-oss:20b`
@@ -34,3 +35,13 @@ Build from the project root so the model and data directories are included:
 docker build -f web_app/Dockerfile -t solar-iq-web .
 docker run --rm -p 8000:8000 solar-iq-web
 ```
+
+## GitHub Pages
+
+The repository workflow publishes `web_app/static` to:
+
+<https://altayariyasser.github.io/Solar_RAG/>
+
+The public frontend calls the model API at
+`https://solar-rag.onrender.com`. The Render service allows requests from the
+owner's GitHub Pages origin.
