@@ -3,6 +3,7 @@ FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     SOLAR_WEB_HOST=0.0.0.0 \
+    SOLAR_ALLOWED_ORIGIN=https://altayariyasser.github.io \
     PORT=8000
 
 WORKDIR /app
