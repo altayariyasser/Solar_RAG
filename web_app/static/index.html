@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="Solar IQ business dashboard for solar generation, weather, air quality, and site suitability."
+    />
+    <title>Solar IQ | Decision workspace</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <a class="brand" href="/" aria-label="Solar IQ home">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 48 48" role="img">
+              <circle cx="30" cy="16" r="7"></circle>
+              <path d="M8 28h26l5 14H13L8 28Z"></path>
+              <path d="M14 28l3 14M24 28v14M34 28l-3 14M10 35h27"></path>
+            </svg>
+          </span>
+          <span>
+            <strong>Solar IQ</strong>
+            <small>Decision intelligence</small>
+          </span>
+        </a>
+
+        <nav class="nav-list" aria-label="Primary navigation">
+          <button class="nav-item active" data-target="overview">
+            <span aria-hidden="true">⌂</span> Overview
+          </button>
+          <button class="nav-item" data-target="analysis">
+            <span aria-hidden="true">✦</span> New analysis
+          </button>
+          <button class="nav-item" data-target="drivers">
+            <span aria-hidden="true">▥</span> Decision drivers
+          </button>
+        </nav>
+
+        <div class="market-panel">
+          <p class="eyebrow">Project coverage</p>
+          <strong>5 Saudi markets</strong>
+          <p>Riyadh, Jeddah, Mecca, Medina, and Dammam</p>
+          <div class="status"><i></i> Models operational</div>
+        </div>
+
+        <p class="sidebar-foot">
+          Saved notebook models<br />
+          Historical + live inputs
+        </p>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <button class="menu-button" type="button" aria-label="Open navigation">☰</button>
+          <div>
+            <p class="eyebrow">Solar decision intelligence</p>
+            <h1>Decision workspace</h1>
+          </div>
+          <div class="top-actions">
+            <span class="live-pill"><i></i> Live</span>
+            <button class="new-analysis" type="button">New analysis</button>
+          </div>
+        </header>
+
+        <section class="intro panel" id="overview">
+          <div>
+            <span class="section-kicker">Portfolio intelligence</span>
+            <h2>Evaluate solar opportunity with one clear question.</h2>
+            <p>
+              Compare solar potential, weather, and air-quality risk across the
+              project’s supported Saudi locations.
+            </p>
+          </div>
+          <div class="coverage-grid" aria-label="Project overview">
+            <article>
+              <span>Markets covered</span>
+              <strong>5</strong>
+              <small>Saudi Arabia</small>
+            </article>
+            <article>
+              <span>Analytical models</span>
+              <strong>2</strong>
+              <small>Solar + AQI</small>
+            </article>
+            <article>
+              <span>Data workflow</span>
+              <strong>Live</strong>
+              <small>Dataset + API</small>
+            </article>
+          </div>
+        </section>
+
+        <section class="analysis-layout" id="analysis">
+          <div class="conversation panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">AI analyst</p>
+                <h2>Start an analysis</h2>
+              </div>
+              <button class="clear-button" type="button">Clear</button>
+            </div>
+
+            <div class="conversation-feed" aria-live="polite">
+              <div class="welcome-message" id="welcomeMessage">
+                <span class="assistant-avatar" aria-hidden="true">✦</span>
+                <div>
+                  <strong>What business decision are you evaluating?</strong>
+                  <p>
+                    Ask naturally. Include a location and date, or continue from
+                    your previous question.
+                  </p>
+                </div>
+              </div>
+              <div id="messages"></div>
+            </div>
+
+            <div class="suggestions" aria-label="Suggested questions">
+              <button type="button" data-question="Compare the solar potential in Jeddah on February 2, 2024.">
+                Jeddah solar potential
+              </button>
+              <button type="button" data-question="Was Riyadh suitable for solar generation on 15 June 2024?">
+                Riyadh site suitability
+              </button>
+              <button type="button" data-question="Review the weather and air quality in Dammam on 10 March 2024.">
+                Dammam risk review
+              </button>
+            </div>
+
+            <form class="composer" id="questionForm">
+              <label class="sr-only" for="questionInput">Ask Solar IQ</label>
+              <textarea
+                id="questionInput"
+                rows="1"
+                placeholder="Ask about a location, date, solar potential, weather, or air quality…"
+                required
+              ></textarea>
+              <button type="submit" aria-label="Run analysis">
+                <span>Analyze</span>
+                <b aria-hidden="true">→</b>
+              </button>
+            </form>
+            <p class="composer-help">
+              Example: “How much solar energy could Jeddah produce on February 2, 2024?”
+            </p>
+          </div>
+
+          <aside class="insight-rail">
+            <section class="panel snapshot" id="snapshot">
+              <div class="empty-state">
+                <span class="empty-icon" aria-hidden="true">☀</span>
+                <h3>Analysis snapshot</h3>
+                <p>Your key results will appear here after you ask a question.</p>
+              </div>
+            </section>
+
+            <section class="panel workflow">
+              <p class="eyebrow">How it works</p>
+              <ol>
+                <li><b>1</b><span><strong>Understand</strong>Location, date, and decision</span></li>
+                <li><b>2</b><span><strong>Retrieve</strong>Historical or live inputs</span></li>
+                <li><b>3</b><span><strong>Predict</strong>Notebook solar and AQI models</span></li>
+                <li><b>4</b><span><strong>Explain</strong>Business-ready recommendation</span></li>
+              </ol>
+            </section>
+          </aside>
+        </section>
+
+        <section class="drivers panel hidden" id="drivers">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Evidence</p>
+              <h2>Decision drivers</h2>
+            </div>
+            <span id="sourceBadge" class="source-badge">Waiting for analysis</span>
+          </div>
+          <div class="driver-columns">
+            <div>
+              <h3>Weather and solar</h3>
+              <div id="weatherDrivers" class="driver-list"></div>
+            </div>
+            <div>
+              <h3>Air quality</h3>
+              <div id="airDrivers" class="driver-list"></div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div class="toast" id="toast" role="status"></div>
+    <script src="/app.js" defer></script>
+  </body>
+</html>
