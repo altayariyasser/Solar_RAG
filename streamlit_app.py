@@ -7,7 +7,6 @@ streamlit_app(3).py
 Python
 change the theme of my streamlit the one named (streamlit_app.py) make it like this html exactly
 
-Worked for 4m 12s
 Updated streamlit_app.py.
 
 It now includes:
