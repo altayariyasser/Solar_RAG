@@ -1,4 +1,4 @@
-"""Portable, lightweight RAG pipeline for the Solar Project Streamlit app."""
+"""Portable RAG pipeline used by the integrated SolarIQ Streamlit app."""
 
 from __future__ import annotations
 
@@ -143,7 +143,7 @@ class DataLoader:
         values["Date"] = target_date.strftime("%Y-%m-%d")
         values["City"] = city.title()
         values["_source_kind"] = "historical"
-        values["_source_label"] = "Project dataset · historical observation"
+        values["_source_label"] = "Project dataset آ· historical observation"
         values["_air_quality_available"] = True
         return values
 
@@ -275,8 +275,8 @@ class OpenMeteoClient:
             "wind_speed_10m_mean": self._mean(weather.get("wind_speed_10m")),
             "cloud_cover_mean": self._mean(weather.get("cloud_cover")),
             "precipitation_sum": self._sum(weather.get("precipitation")),
-            # Hourly shortwave radiation is W/m². Summing 1-hour values and
-            # multiplying by 0.0036 converts the result to MJ/m².
+            # Hourly shortwave radiation is W/mآ². Summing 1-hour values and
+            # multiplying by 0.0036 converts the result to MJ/mآ².
             "shortwave_radiation_sum": (
                 self._sum(weather.get("shortwave_radiation")) * 0.0036
                 if self._sum(weather.get("shortwave_radiation")) is not None
@@ -316,9 +316,9 @@ class OpenMeteoClient:
                 "City": city,
                 "_source_kind": source_kind,
                 "_source_label": (
-                    "Open-Meteo · forecast inputs"
+                    "Open-Meteo آ· forecast inputs"
                     if is_forecast
-                    else "Open-Meteo · historical weather"
+                    else "Open-Meteo آ· historical weather"
                 ),
                 "_air_quality_available": air_available,
             }
@@ -714,8 +714,8 @@ class SolarRAG:
                 status="error",
                 error=(
                     f"What date should I use for {city}? You can write it naturally, "
-                    "for example “February 2, 2026”, “2 February 2026”, "
-                    "“tomorrow”, or “last Friday”."
+                    "for example â€œFebruary 2, 2026â€‌, â€œ2 February 2026â€‌, "
+                    "â€œtomorrowâ€‌, or â€œlast Fridayâ€‌."
                 ),
             )
             return result
@@ -806,7 +806,7 @@ class SolarRAG:
 
         weather_parts = []
         if temperature is not None:
-            weather_parts.append(f"mean temperature {temperature:.1f} °C")
+            weather_parts.append(f"mean temperature {temperature:.1f} آ°C")
         if humidity is not None:
             weather_parts.append(f"humidity {humidity:.0f}%")
         if wind is not None:
@@ -887,7 +887,7 @@ class SolarRAG:
     @classmethod
     def _extract_date(cls, query: str) -> Optional[str]:
         """Understand common conversational date expressions without dependencies."""
-        normalized = query.lower().replace("’", "'")
+        normalized = query.lower().replace("â€™", "'")
         today = datetime.now().date()
 
         relative_days = {
